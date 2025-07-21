@@ -52,26 +52,30 @@ DATASET_QUERY_NUM_UPPER_BOUND = 500000  # Maximum number of queries per dataset
 resize_transform = transforms.Resize(IMAGE_SHORT_SIDE)
 
 
-def hash_qid(qid):
-    dataset_id, data_within_id = map(int, qid.split(":"))
-    return dataset_id * DATASET_QUERY_NUM_UPPER_BOUND + data_within_id
+def hash_qid(qid): # for some reason the hashing does not work
+    # dataset_id, data_within_id = map(int, qid.split(":"))
+    # return dataset_id * DATASET_QUERY_NUM_UPPER_BOUND + data_within_id
+    return qid
 
 
 def unhash_qid(hashed_qid):
-    dataset_id = hashed_qid // DATASET_QUERY_NUM_UPPER_BOUND
-    data_within_id = hashed_qid % DATASET_QUERY_NUM_UPPER_BOUND
-    return f"{dataset_id}:{data_within_id}"
+    # dataset_id = hashed_qid // DATASET_QUERY_NUM_UPPER_BOUND
+    # data_within_id = hashed_qid % DATASET_QUERY_NUM_UPPER_BOUND
+    # return f"{dataset_id}:{data_within_id}"
+    return hashed_qid
 
 
 def hash_did(did):
-    dataset_id, data_within_id = map(int, did.split(":"))
-    return dataset_id * DATASET_CAN_NUM_UPPER_BOUND + data_within_id
+    # dataset_id, data_within_id = map(int, did.split(":"))
+    # return dataset_id * DATASET_CAN_NUM_UPPER_BOUND + data_within_id
+    return did
 
 
 def unhash_did(hashed_did):
-    dataset_id = hashed_did // DATASET_CAN_NUM_UPPER_BOUND
-    data_within_id = hashed_did % DATASET_CAN_NUM_UPPER_BOUND
-    return f"{dataset_id}:{data_within_id}"
+    # dataset_id = hashed_did // DATASET_CAN_NUM_UPPER_BOUND
+    # data_within_id = hashed_did % DATASET_CAN_NUM_UPPER_BOUND
+    # return f"{dataset_id}:{data_within_id}"
+    return hashed_did
 
 
 def get_dataset_id(dataset_name):

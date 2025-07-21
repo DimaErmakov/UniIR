@@ -1,0 +1,49 @@
+# BioCLIP Score Fusion Configuration, this does not work
+model:
+  name: "BioCLIPScoreFusion"
+  short_name: "bioclip_sf"
+  clip_vision_model_name: "hf-hub:imageomics/bioclip"
+  pretrained_clip_model_dir: "checkpoint/BioCLIP"
+  gather_embeddings: true
+  ckpt_config:
+    ckpt_dir: "checkpoint/BioCLIP"
+    ckpt_name: "bioclip_sf_epoch_0.pth"
+    resume_training: false
+
+data_config:
+  train_query_data_path: "/train_queries.jsonl"
+  train_candidate_data_path: "/train_candidates.jsonl"
+  valid_query_data_path: "/valid_queries.jsonl"
+  valid_candidate_data_path: "/valid_candidates.jsonl"
+  in_batch_neg_num: 3
+
+dataloader_config:
+  train_batch_size: 32
+  valid_batch_size: 32
+  num_workers: 4
+
+trainer_config:
+  num_train_epochs: 10
+  learning_rate: 1e-5
+  gradient_accumulation_steps: 1
+  skip_scheduler: false
+
+evaluator:
+  enable_eval: true
+  eval_freq: 1
+
+dist_config:
+  distributed_mode: true
+  dist_url: "env://"
+  gpu_id: 0
+  world_size: 1
+
+wandb_config:
+  enabled: true
+  experiment_name: "bioclip_sf_training"
+
+logger_config:
+  logger_out_dir: "logs"
+  logger_out_file_name: "bioclip_sf_training.log"
+
+seed: 42 

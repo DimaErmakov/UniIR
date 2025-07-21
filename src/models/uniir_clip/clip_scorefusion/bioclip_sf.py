@@ -1,30 +1,38 @@
 """
-Score level fusion model using CLIP
-Code adapted from OpenAI's CLIP codebase
+Score level fusion model using BioCLIP
+Code adapted from OpenAI's CLIP codebase and BioCLIP repository
 """
 
+# This does not work, never fixed it
 import torch
 from torch import nn
 import torch.nn.functional as F
-import clip
+import open_clip
 import torch.distributed.nn
 
 
-
-class CLIPScoreFusion(nn.Module):
+class BioCLIPScoreFusion(nn.Module):
     def __init__(
         self,
-        model_name="ViT-B/32",
+        model_name="hf-hub:imageomics/bioclip",
         device="cuda",
-        jit=False,
         download_root=None,
         config=None,
     ):
         super().__init__()
 
-        # Load pre-trained CLIP model
-        self.clip_model, self.img_preprocess_fn = clip.load(model_name, device, jit, download_root=download_root)
-        self.tokenizer = clip.tokenize
+        # Load pre-trained BioCLIP model
+        try:
+            self.clip_model, self.img_preprocess_fn, _ = (
+                open_clip.create_model_and_transforms(model_name, device=device)
+            )
+            self.tokenizer = open_clip.get_tokenizer(model_name)
+        except Exception as e:
+            print(f"Error loading BioCLIP model: {e}")
+            print(f"Model name: {model_name}")
+            print(f"Device: {device}")
+            raise e
+
         self.loss_function = nn.CrossEntropyLoss()
         if config is not None:
             self.gather_embeddings = config.model.gather_embeddings
@@ -36,7 +44,7 @@ class CLIPScoreFusion(nn.Module):
     def get_tokenizer(self):
         def tokenizer_wrapper(txt):
             tokenizer = self.tokenizer
-            txt_tensor = tokenizer(txt, context_length=77, truncate=True)
+            txt_tensor = tokenizer(txt, context_length=77)
             return txt_tensor
 
         return tokenizer_wrapper
@@ -63,21 +71,21 @@ class CLIPScoreFusion(nn.Module):
         batch_size = txt_tensor.size(0)
         embed_dim = self.clip_model.text_projection.shape[1]  # Get embedding dimension
         device = txt_tensor.device
-        
-        # Create tensors with the same dtype as the model output (float16 for FP16 mode)
-        txt_emb = torch.zeros(batch_size, embed_dim, device=device, dtype=torch.float16)
-        img_emb = torch.zeros(batch_size, embed_dim, device=device, dtype=torch.float16)
-        
+
+        # Create tensors with the same dtype as the model output
+        txt_emb = torch.zeros(batch_size, embed_dim, device=device, dtype=torch.float32)
+        img_emb = torch.zeros(batch_size, embed_dim, device=device, dtype=torch.float32)
+
         # Only encode text for samples that have text (txt_mask == 1)
         if txt_mask.sum() > 0:
             txt_indices = torch.where(txt_mask == 1)[0]
-            txt_emb[txt_indices] = self.encode_text(txt_tensor[txt_indices])
-        
+            txt_emb[txt_indices] = self.encode_text(txt_tensor[txt_indices]).float()
+
         # Only encode image for samples that have image (img_mask == 1)
         if img_mask.sum() > 0:
             img_indices = torch.where(img_mask == 1)[0]
-            img_emb[img_indices] = self.encode_image(img_tensor[img_indices])
-        
+            img_emb[img_indices] = self.encode_image(img_tensor[img_indices]).float()
+
         return self.fuse_embeddings(txt_emb, img_emb)  # shape: [batch_size, embed_dim]
 
     def get_logit_scale(self):
@@ -100,14 +108,22 @@ class CLIPScoreFusion(nn.Module):
         enable_hard_neg = "neg_cand_list" in index_mapping
 
         # Compute embeddings
-        embeddings = self.encode_multimodal_input(txt_batched, image_batched, txt_mask_batched, image_mask_batched)
+        embeddings = self.encode_multimodal_input(
+            txt_batched, image_batched, txt_mask_batched, image_mask_batched
+        )
 
         # Extract embeddings
-        q_embeds = embeddings[torch.tensor(index_mapping["query"]).flatten()]  # shape: [bs, embed_dim]
-        p_embeds = embeddings[torch.tensor(index_mapping["pos_cand"]).flatten()]  # shape: [bs, embed_dim]
+        q_embeds = embeddings[
+            torch.tensor(index_mapping["query"]).flatten()
+        ]  # shape: [bs, embed_dim]
+        p_embeds = embeddings[
+            torch.tensor(index_mapping["pos_cand"]).flatten()
+        ]  # shape: [bs, embed_dim]
         n_embeds = None
         if enable_hard_neg:
-            n_embeds = embeddings[torch.tensor(index_mapping["neg_cand_list"])]  # [bs, neg_num, embed_dim]
+            n_embeds = embeddings[
+                torch.tensor(index_mapping["neg_cand_list"])
+            ]  # [bs, neg_num, embed_dim]
         bs = q_embeds.size(0)
 
         # Normalized features
@@ -118,7 +134,9 @@ class CLIPScoreFusion(nn.Module):
 
         # We gather tensors from all gpus
         if self.gather_embeddings:
-            all_p_embeds = torch.cat(torch.distributed.nn.all_gather(p_embeds), dim=0)  # [bs * num_gpus, embed_dim]
+            all_p_embeds = torch.cat(
+                torch.distributed.nn.all_gather(p_embeds), dim=0
+            )  # [bs * num_gpus, embed_dim]
 
         if enable_hard_neg:
             # Normalize the negative embeddings
@@ -129,14 +147,22 @@ class CLIPScoreFusion(nn.Module):
 
             # Augment neg_cand_embeddings with a subset of in-batch positive candidates from other queries
             mask = torch.eye(bs).to(n_embeds.device) == 0
-            in_batch_negs = p_embeds.unsqueeze(1).expand(-1, bs, -1)[mask].reshape(bs, bs - 1, -1)
+            in_batch_negs = (
+                p_embeds.unsqueeze(1).expand(-1, bs, -1)[mask].reshape(bs, bs - 1, -1)
+            )
             in_batch_negs = in_batch_negs[:, :in_batch_neg_num, :]
-            aug_n_embeds = torch.cat([n_embeds, in_batch_negs], dim=1)  # [bs, neg_num + in_batch_neg_num, embed_dim]
+            aug_n_embeds = torch.cat(
+                [n_embeds, in_batch_negs], dim=1
+            )  # [bs, neg_num + in_batch_neg_num, embed_dim]
 
             # Compute similarity scores for positives and negatives
             pos_scores = (q_embeds * p_embeds).sum(-1) * logit_scale  # [bs]
-            neg_scores = (q_embeds.unsqueeze(1) * aug_n_embeds).sum(-1) * logit_scale  # [bs, neg_num +in_batch_neg_num]
-            logit_matrix = torch.cat([pos_scores.unsqueeze(-1), neg_scores], 1)  # [bs, neg_num + in_batch_neg_num + 1]
+            neg_scores = (q_embeds.unsqueeze(1) * aug_n_embeds).sum(
+                -1
+            ) * logit_scale  # [bs, neg_num +in_batch_neg_num]
+            logit_matrix = torch.cat(
+                [pos_scores.unsqueeze(-1), neg_scores], 1
+            )  # [bs, neg_num + in_batch_neg_num + 1]
 
             # Compute log softmax over the matrix
             lsm = F.log_softmax(logit_matrix, dim=1)
@@ -149,7 +175,9 @@ class CLIPScoreFusion(nn.Module):
             accuracy = (max_idxs == 0).sum() / bs
         else:
             if self.gather_embeddings:
-                score = torch.matmul(q_embeds, all_p_embeds.t()) * logit_scale  # [bs, bs * num_gpus]
+                score = (
+                    torch.matmul(q_embeds, all_p_embeds.t()) * logit_scale
+                )  # [bs, bs * num_gpus]
                 gpu_id = torch.distributed.get_rank()
                 sim_targets = (gpu_id * bs + torch.arange(bs)).to(score.device)  # [bs]
             else:
@@ -182,5 +210,7 @@ class CLIPScoreFusion(nn.Module):
             batch["txt_mask_batched"],
             batch["image_mask_batched"],
         )
-        assert embeddings.size(0) == len(id_list), "embeddings and id_batched must have the same batch size."
+        assert embeddings.size(0) == len(
+            id_list
+        ), "embeddings and id_batched must have the same batch size."
         return embeddings, id_list

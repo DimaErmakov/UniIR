@@ -26,6 +26,7 @@ from data.preprocessing.utils import (
     unhash_did,
     unhash_qid,
     get_mbeir_task_name,
+    DATASET_CAN_NUM_UPPER_BOUND,  # <-- import upper bound
 )
 import dist_utils
 from interactive_retriever import InteractiveRetriever
@@ -68,12 +69,59 @@ def create_index(config):
         # Load the embeddings and IDs from the .npy files
         embedding_list = np.load(embed_data_path).astype("float32")
         hashed_id_list = np.load(embed_data_hashed_id_path)
+        print(f"Candidate pool embeddings shape: {embedding_list.shape}")
+        if embedding_list.sum() == 0:
+            print("WARNING: All candidate pool embeddings are zero!")
+        else:
+            print(f"Candidate pool embeddings - mean: {embedding_list.mean():.6f}, std: {embedding_list.std():.6f}")
+            
+            # Check if all candidate embeddings are identical
+            if embedding_list.shape[0] > 1:
+                first_cand_embedding = embedding_list[0]
+                identical_count = 0
+                for i in range(1, min(10, embedding_list.shape[0])):  # Check first 10
+                    if np.allclose(embedding_list[i], first_cand_embedding, atol=1e-6):
+                        identical_count += 1
+                print(f"Identical candidate embeddings: {identical_count}/{min(9, embedding_list.shape[0]-1)} are identical to the first one")
+                
+                # Show some sample candidate embeddings
+                print(f"First candidate embedding (first 10 values): {embedding_list[0][:10]}")
+                print(f"Second candidate embedding (first 10 values): {embedding_list[1][:10]}")
+                print(f"Last candidate embedding (first 10 values): {embedding_list[-1][:10]}")
+                
+                # DEBUG: Check L2 norms before normalization
+                l2_norms_before = np.linalg.norm(embedding_list, axis=1)
+                print(f"DEBUG: Candidate L2 norms before normalization - range: [{l2_norms_before.min():.6f}, {l2_norms_before.max():.6f}]")
+                print(f"DEBUG: Candidate L2 norms mean: {l2_norms_before.mean():.6f}")
+                
+                # Check for zero vectors
+                zero_vectors = np.sum(l2_norms_before == 0.0)
+                print(f"DEBUG: Zero L2 norm candidate vectors: {zero_vectors}/{embedding_list.shape[0]}")
+        # Convert string IDs like '1:7476031' to unique ints for FAISS
+        if hashed_id_list.dtype.type is np.str_ or hashed_id_list.dtype == object:
+            def strid_to_intid(s):
+                dataset_id, data_within_id = map(int, s.split(":"))
+                return dataset_id * DATASET_CAN_NUM_UPPER_BOUND + data_within_id
+            hashed_id_list = np.array([strid_to_intid(s) for s in hashed_id_list], dtype=np.int64)
+        else:
+            hashed_id_list = hashed_id_list.astype(np.int64)
 
         # Check unique ids
         assert len(hashed_id_list) == len(set(hashed_id_list)), "IDs should be unique"
 
         # Normalize the embeddings
         faiss.normalize_L2(embedding_list)
+        
+        # DEBUG: Check L2 norms after normalization
+        l2_norms_after = np.linalg.norm(embedding_list, axis=1)
+        print(f"DEBUG: Candidate L2 norms after normalization - range: [{l2_norms_after.min():.6f}, {l2_norms_after.max():.6f}]")
+        print(f"DEBUG: Candidate L2 norms mean: {l2_norms_after.mean():.6f}")
+        
+        # Check if normalization worked properly
+        if not np.allclose(l2_norms_after, 1.0, atol=1e-6):
+            print("WARNING: L2 normalization may not have worked properly!")
+        else:
+            print("DEBUG: L2 normalization successful - all vectors have unit norm")
 
         # Dimension of the embeddings
         d = embedding_list.shape[1]
@@ -132,57 +180,19 @@ def create_index(config):
 # def compute_recall_at_k(relevant_docs, retrieved_indices, k):
 #     if not relevant_docs:
 #         return 0.0  # Return 0 if there are no relevant documents
-#
+
 #     top_k_retrieved_indices_set = set(retrieved_indices[:k])
 #     relevant_docs_set = set(relevant_docs)
-#
+
 #     assert len(relevant_docs_set) == len(relevant_docs), "Relevant docs should not contain duplicates"
 #     assert len(top_k_retrieved_indices_set) == len(
 #         retrieved_indices[:k]
 #     ), "Retrieved docs should not contain duplicates"
-#
+
 #     relevant_retrieved = relevant_docs_set.intersection(top_k_retrieved_indices_set)
 #     recall_at_k = len(relevant_retrieved) / len(relevant_docs)
 #     return recall_at_k
 
-
-def compute_recall_at_k(relevant_docs, retrieved_indices, k):
-    # Recall used by CLIP and BLIP codebase
-    # Return 0 if there are no relevant documents
-    if not relevant_docs:
-        return 0.0
-
-    # Get the set of indices for the top k retrieved documents
-    top_k_retrieved_indices_set = set(retrieved_indices[:k])
-
-    # Convert the relevant documents to a set
-    relevant_docs_set = set(relevant_docs)
-
-    # Check if there is an intersection between relevant docs and top k retrieved docs
-    # If there is, we return 1, indicating successful retrieval; otherwise, we return 0
-    if relevant_docs_set.intersection(top_k_retrieved_indices_set):
-        return 1.0
-    else:
-        return 0.0
-
-
-def load_qrel(filename):
-    qrel = {}
-    qid_to_taskid = {}
-    with open(filename, "r") as f:
-        for line in f:
-            query_id, _, doc_id, relevance_score, task_id = line.strip().split()
-            if int(relevance_score) > 0:  # Assuming only positive relevance scores indicate relevant documents
-                if query_id not in qrel:
-                    qrel[query_id] = []
-                qrel[query_id].append(doc_id)
-                if query_id not in qid_to_taskid:
-                    qid_to_taskid[query_id] = task_id
-    print(f"Retriever: Loaded {len(qrel)} queries from {filename}")
-    print(
-        f"Retriever: Average number of relevant documents per query: {sum(len(v) for v in qrel.values()) / len(qrel):.2f}"
-    )
-    return qrel, qid_to_taskid
 
 
 def search_index(query_embed_path, cand_index_path, batch_size=10, num_cand_to_retrieve=10):
@@ -190,45 +200,139 @@ def search_index(query_embed_path, cand_index_path, batch_size=10, num_cand_to_r
     query_embeddings = np.load(query_embed_path).astype("float32")
     print(f"Faiss: loaded query embeddings from {query_embed_path} with shape: {query_embeddings.shape}")
 
+    # DEBUG: Check query embeddings before normalization
+    print(f"DEBUG: Query embeddings before normalization - range: [{query_embeddings.min():.6f}, {query_embeddings.max():.6f}]")
+    print(f"DEBUG: Query embeddings before normalization - mean: {query_embeddings.mean():.6f}, std: {query_embeddings.std():.6f}")
+    
+    # Check if query embeddings are all zero
+    zero_query_count = np.sum(query_embeddings == 0.0)
+    total_query_elements = query_embeddings.size
+    print(f"DEBUG: Zero query embeddings: {zero_query_count}/{total_query_elements} ({100*zero_query_count/total_query_elements:.2f}%)")
+
     # Normalize the full query embeddings
     faiss.normalize_L2(query_embeddings)
+    
+    # DEBUG: Check query embeddings after normalization
+    print(f"DEBUG: Query embeddings after normalization - range: [{query_embeddings.min():.6f}, {query_embeddings.max():.6f}]")
+    print(f"DEBUG: Query embeddings after normalization - mean: {query_embeddings.mean():.6f}, std: {query_embeddings.std():.6f}")
+    
+    # Check L2 norms after normalization (should be 1.0 for all vectors)
+    l2_norms = np.linalg.norm(query_embeddings, axis=1)
+    print(f"DEBUG: L2 norms after normalization - range: [{l2_norms.min():.6f}, {l2_norms.max():.6f}]")
+    print(f"DEBUG: L2 norms mean: {l2_norms.mean():.6f}")
 
     # Load the saved CPU index from disk
     index_cpu = faiss.read_index(cand_index_path)
     print(f"Faiss: loaded index from {cand_index_path}")
     print(f"Faiss: Number of documents in the index: {index_cpu.ntotal}")
+    
+    # Debug: Check if index is properly built
+    if hasattr(index_cpu, 'get_xb'):
+        try:
+            # Try to get some vectors from the index
+            sample_vectors = index_cpu.get_xb()[:5]  # Get first 5 vectors
+            print(f"Sample vectors from index (first 5, first 10 values each):")
+            for i, vec in enumerate(sample_vectors):
+                print(f"  Vector {i}: {vec[:10]}")
+                
+            # Check L2 norms of index vectors
+            index_l2_norms = np.linalg.norm(sample_vectors, axis=1)
+            print(f"DEBUG: Index vectors L2 norms: {index_l2_norms}")
+        except Exception as e:
+            print(f"Could not get vectors from index: {e}")
+    else:
+        print("Index does not have get_xb method")
 
-    # Convert the CPU index to multiple GPU indices
-    ngpus = faiss.get_num_gpus()
-    print(f"Faiss: Number of GPUs used for searching: {ngpus}")
-    co = faiss.GpuMultipleClonerOptions()
-    co.shard = True  # Use shard to divide the data across the GPUs
-    index_gpu = faiss.index_cpu_to_all_gpus(index_cpu, co=co, ngpu=ngpus)  # This shards the index across all GPUs
-
+    # Use CPU-based search for reliability
+    print(f"Faiss: Using CPU-based search for reliability")
+    
     all_distances = []
     all_indices = []
 
     # Process in batches
     for i in range(0, len(query_embeddings), batch_size):
         batch = query_embeddings[i : i + batch_size]
-        distances, indices = search_index_with_batch(batch, index_gpu, num_cand_to_retrieve)
+        distances, indices = search_index_with_batch(batch, index_cpu, num_cand_to_retrieve)
         all_distances.append(distances)
         all_indices.append(indices)
 
     # Stack results for distances and indices
     final_distances = np.vstack(all_distances)
     final_indices = np.vstack(all_indices)
+    
+    # DEBUG: Final check of results
+    print(f"DEBUG: Final distances shape: {final_distances.shape}")
+    print(f"DEBUG: Final distances range: [{final_distances.min():.6f}, {final_distances.max():.6f}]")
+    print(f"DEBUG: Final distances mean: {final_distances.mean():.6f}")
 
     return final_distances, final_indices
 
 
-def search_index_with_batch(query_embeddings_batch, index_gpu, num_cand_to_retrieve=10):
+def search_index_with_batch(query_embeddings_batch, index_cpu, num_cand_to_retrieve=10):
     # Ensure query_embeddings_batch is numpy array with dtype float32
     assert isinstance(query_embeddings_batch, np.ndarray) and query_embeddings_batch.dtype == np.float32
     print(f"Faiss: query_embeddings_batch.shape: {query_embeddings_batch.shape}")
 
-    # Query the multi-GPU index
-    distances, indices = index_gpu.search(query_embeddings_batch, num_cand_to_retrieve)  # (number_of_queries, k)
+    # Query the CPU index
+    distances, indices = index_cpu.search(query_embeddings_batch, num_cand_to_retrieve)  # (number_of_queries, k)
+    
+    # DEBUG: Verify that we're getting different results for different queries
+    if query_embeddings_batch.shape[0] > 1:
+        first_indices = indices[0]
+        second_indices = indices[1]
+        indices_different = not np.array_equal(first_indices, second_indices)
+        print(f"DEBUG: First and second query indices are different: {indices_different}")
+        if indices_different:
+            print(f"DEBUG: First query indices: {first_indices[:5]}")
+            print(f"DEBUG: Second query indices: {second_indices[:5]}")
+        else:
+            print("WARNING: All queries are returning the same indices!")
+    
+    # DEBUG: Print detailed information about the search results
+    print(f"DEBUG: distances.shape: {distances.shape}, indices.shape: {indices.shape}")
+    print(f"DEBUG: distances dtype: {distances.dtype}, indices dtype: {indices.dtype}")
+    print(f"DEBUG: distances range: [{distances.min():.6f}, {distances.max():.6f}]")
+    print(f"DEBUG: distances mean: {distances.mean():.6f}, std: {distances.std():.6f}")
+    print(f"DEBUG: First query distances: {distances[0]}")
+    print(f"DEBUG: First query indices: {indices[0]}")
+    
+    # DEBUG: Check for zero distances
+    zero_distances = np.sum(distances == 0.0)
+    total_distances = distances.size
+    print(f"DEBUG: Zero distances: {zero_distances}/{total_distances} ({100.0 * zero_distances / total_distances:.2f}%)")
+    
+    # DEBUG: Check for NaN or Inf values
+    nan_distances = np.sum(np.isnan(distances))
+    inf_distances = np.sum(np.isinf(distances))
+    print(f"DEBUG: NaN distances: {nan_distances}, Inf distances: {inf_distances}")
+    
+    # DEBUG: Check a few sample query embeddings and their dot products
+    if query_embeddings_batch.shape[0] > 0:
+        sample_query = query_embeddings_batch[0]
+        print(f"DEBUG: Sample query embedding (first 10 values): {sample_query[:10]}")
+        print(f"DEBUG: Sample query embedding norm: {np.linalg.norm(sample_query):.6f}")
+        
+        # Try to get a few candidate embeddings from the index to check dot products
+        try:
+            # This might not work with all FAISS index types, but worth trying
+            if hasattr(index_cpu, 'get_xb'):
+                cand_embeddings = index_cpu.get_xb()
+                print(f"DEBUG: Candidate embeddings shape: {cand_embeddings.shape}")
+                if cand_embeddings.shape[0] > 0:
+                    sample_cand = cand_embeddings[0]
+                    print(f"DEBUG: Sample candidate embedding (first 10 values): {sample_cand[:10]}")
+                    print(f"DEBUG: Sample candidate embedding norm: {np.linalg.norm(sample_cand):.6f}")
+                    
+                    # Calculate dot product manually
+                    dot_product = np.dot(sample_query, sample_cand)
+                    print(f"DEBUG: Manual dot product between sample query and candidate: {dot_product:.6f}")
+        except Exception as e:
+            print(f"DEBUG: Could not access candidate embeddings from index: {e}")
+    
+    print(f"DEBUG: Final distances shape: {distances.shape}")
+    print(f"DEBUG: Final distances range: [{distances.min():.6f}, {distances.max():.6f}]")
+    print(f"DEBUG: Final distances mean: {distances.mean():.6f}")
+    
     return distances, indices
 
 
@@ -314,7 +418,6 @@ def run_retrieval(config, query_embedder_config=None):
     uniir_dir = config.uniir_dir
     mbeir_data_dir = config.mbeir_data_dir
     retrieval_config = config.retrieval_config
-    qrel_dir_name = retrieval_config.qrel_dir_name
     embed_dir_name = retrieval_config.embed_dir_name
     index_dir_name = retrieval_config.index_dir_name
     query_dir_name = retrieval_config.query_dir_name
@@ -340,8 +443,6 @@ def run_retrieval(config, query_embedder_config=None):
         if retrieval_dataset_config and retrieval_dataset_config.enable_retrieve:
             dataset_name_list = getattr(retrieval_dataset_config, "datasets_name", None)
             cand_pool_name_list = getattr(retrieval_dataset_config, "correspond_cand_pools_name", None)
-            qrel_name_list = getattr(retrieval_dataset_config, "correspond_qrels_name", None)
-            metric_names_list = getattr(retrieval_dataset_config, "correspond_metrics_name", None)
             dataset_embed_dir = os.path.join(uniir_dir, embed_dir_name, expt_dir_name, split_name)
             splits.append(
                 (
@@ -349,13 +450,8 @@ def run_retrieval(config, query_embedder_config=None):
                     dataset_embed_dir,
                     dataset_name_list,
                     cand_pool_name_list,
-                    qrel_name_list,
-                    metric_names_list,
                 )
             )
-            assert (
-                len(dataset_name_list) == len(cand_pool_name_list) == len(qrel_name_list) == len(metric_names_list)
-            ), "Mismatch between datasets and candidate pools and qrels."
 
     # Pretty Print dataset to index
     print("-" * 30)
@@ -364,38 +460,27 @@ def run_retrieval(config, query_embedder_config=None):
         dataset_embed_dir,
         dataset_name_list,
         cand_pool_name_list,
-        qrel_name_list,
-        metric_names_list,
     ) in splits:
         print(
-            f"Split: {split_name}, Retrieval Datasets: {dataset_name_list}, Candidate Pools: {cand_pool_name_list}, Metric: {metric_names_list})"
+            f"Split: {split_name}, Retrieval Datasets: {dataset_name_list}, Candidate Pools: {cand_pool_name_list}"
         )
         print("-" * 30)
 
-    eval_results = []
     cand_index_dir = os.path.join(uniir_dir, index_dir_name, expt_dir_name, "cand_pool")
-    qrel_dir = os.path.join(mbeir_data_dir, qrel_dir_name)
     for (
         split,
         dataset_embed_dir,
         dataset_name_list,
         cand_pool_name_list,
-        qrel_name_list,
-        metric_names_list,
     ) in splits:
-        for dataset_name, cand_pool_name, qrel_name, metric_names in zip(
-            dataset_name_list, cand_pool_name_list, qrel_name_list, metric_names_list
+        for dataset_name, cand_pool_name in zip(
+            dataset_name_list, cand_pool_name_list
         ):
             print("\n" + "-" * 30)
             print(f"Retriever: Retrieving for query:{dataset_name} | split:{split} | from cand_pool:{cand_pool_name}")
 
             dataset_name = dataset_name.lower()
             cand_pool_name = cand_pool_name.lower()
-            qrel_name = qrel_name.lower()
-
-            # Load qrels
-            qrel_path = os.path.join(qrel_dir, split, f"mbeir_{qrel_name}_{split}_qrels.txt")
-            qrel, qid_to_taskid = load_qrel(qrel_path)
 
             # Load query Hashed IDs
             embed_query_id_path = os.path.join(dataset_embed_dir, f"mbeir_{dataset_name}_{split}_ids.npy")
@@ -407,21 +492,16 @@ def run_retrieval(config, query_embedder_config=None):
             # Load the candidate pool index
             cand_index_path = os.path.join(cand_index_dir, f"mbeir_{cand_pool_name}_cand_pool.index")
 
-            # Set up the metric
-            # e.g. "Recall@1, Recall@5, Recall@10"
-            # TODO: add more metrics
-            metric_list = [metric.strip() for metric in metric_names.split(",")]
-            metric_recall_list = [metric for metric in metric_list if "recall" in metric.lower()]
-
             # Search the index
-            k = max([int(metric.split("@")[1]) for metric in metric_recall_list])
+            k = 10  # Default k value
             print(f"Retriever: Searching with k={k}")
             retrieved_cand_dist, retrieved_indices = search_index(
                 embed_query_path,
                 cand_index_path,
-                batch_size=hashed_query_ids.shape[0],
-                num_cand_to_retrieve=k,
-            )  # Shape: (number_of_queries, k)
+                # batch_size=hashed_query_ids.shape[0], #TODO
+                batch_size=64,  # or 16, 64, etc. -- tune for your GPU
+                num_cand_to_retrieve=10,
+            )
 
             # Open a file to write the run results
             if cand_pool_name == "union":
@@ -430,16 +510,36 @@ def run_retrieval(config, query_embedder_config=None):
                 run_id = f"mbeir_{dataset_name}_single_pool_{split}_k{k}"
             run_file_name = f"{run_id}_run.txt"
             run_file_path = os.path.join(exp_run_file_dir, run_file_name)
+            
+            # DEBUG: Print information about the retrieved results before writing
+            print(f"DEBUG: retrieved_cand_dist.shape: {retrieved_cand_dist.shape}")
+            print(f"DEBUG: retrieved_indices.shape: {retrieved_indices.shape}")
+            print(f"DEBUG: retrieved_cand_dist range: [{retrieved_cand_dist.min():.6f}, {retrieved_cand_dist.max():.6f}]")
+            print(f"DEBUG: retrieved_cand_dist mean: {retrieved_cand_dist.mean():.6f}")
+            
+            # Check if all scores are zero
+            zero_score_count = np.sum(retrieved_cand_dist == 0.0)
+            total_scores = retrieved_cand_dist.size
+            print(f"DEBUG: Zero scores in retrieved_cand_dist: {zero_score_count}/{total_scores} ({100*zero_score_count/total_scores:.2f}%)")
+            
+            # Show first few scores
+            if retrieved_cand_dist.shape[0] > 0:
+                print(f"DEBUG: First query scores: {retrieved_cand_dist[0]}")
+                print(f"DEBUG: First query indices: {retrieved_indices[0]}")
+            
             with open(run_file_path, "w") as run_file:
                 for idx, (distances, indices) in enumerate(zip(retrieved_cand_dist, retrieved_indices)):
                     qid = unhash_qid(hashed_query_ids[idx])
-                    task_id = qid_to_taskid[qid]
                     for rank, (hashed_doc_id, score) in enumerate(zip(indices, distances), start=1):
-                        # Format: query-id Q0 document-id rank score run-id task_id
-                        # We can remove task_id if we don't need it later using a helper
+                        # Format: query-id Q0 document-id rank score run-id
                         # Note: since we are using the cosine similarity, we don't need to invert the scores.
                         doc_id = unhash_did(hashed_doc_id)
-                        run_file_line = f"{qid} Q0 {doc_id} {rank} {score} {run_id} {task_id}\n"
+                        
+                        # DEBUG: Print first few lines being written
+                        if idx < 3 and rank <= 3:
+                            print(f"DEBUG: Writing line - qid: {qid}, doc_id: {doc_id}, rank: {rank}, score: {score}")
+                        
+                        run_file_line = f"{qid} Q0 {doc_id} {rank} {score} {run_id}\n"
                         run_file.write(run_file_line)
             print(f"Retriever: Run file saved to {run_file_path}")
 
@@ -472,135 +572,7 @@ def run_retrieval(config, query_embedder_config=None):
                         retrieved_file.write("\n")
                 print(f"Retriever: Retrieved file saved to {retrieved_file_path}")
 
-            # Compute Recall@k
-            recall_values_by_task = defaultdict(lambda: defaultdict(list))
-            for i, retrieved_indices_for_qid in enumerate(retrieved_indices):
-                # Map the retrieved FAISS indices to the original mbeir_data_ids
-                retrieved_indices_for_qid = [unhash_did(idx) for idx in retrieved_indices_for_qid]
-                qid = unhash_qid(hashed_query_ids[i])
-                relevant_docs = qrel[qid]
-                task_id = qid_to_taskid[qid]
 
-                # Compute Recall@k for each metric
-                for metric in metric_recall_list:
-                    k = int(metric.split("@")[1])
-                    recall_at_k = compute_recall_at_k(relevant_docs, retrieved_indices_for_qid, k)
-                    recall_values_by_task[task_id][metric].append(recall_at_k)
-
-            for task_id, recalls in recall_values_by_task.items():
-                task_name = get_mbeir_task_name(int(task_id))
-                result = {
-                    "TaskID": int(task_id),
-                    "Task": task_name,
-                    "Dataset": dataset_name,
-                    "Split": split,
-                    "CandPool": cand_pool_name,
-                }
-                for metric in metric_recall_list:
-                    mean_recall_at_k = round(sum(recalls[metric]) / len(recalls[metric]), 4)
-                    result[metric] = mean_recall_at_k
-                    print(f"Retriever: Mean {metric}: {mean_recall_at_k}")
-                eval_results.append(result)
-
-    # Creating a tsv file for the evaluation results
-    # Sort data by TaskID, then by dataset_order, then by split_order matching the google sheets.
-    dataset_order = {
-        "visualnews_task0": 1,
-        "mscoco_task0": 2,
-        "fashion200k_task0": 3,
-        "webqa_task1": 4,
-        "edis_task2": 5,
-        "webqa_task2": 6,
-        "visualnews_task3": 7,
-        "mscoco_task3": 8,
-        "fashion200k_task3": 9,
-        "nights_task4": 10,
-        "oven_task6": 11,
-        "infoseek_task6": 12,
-        "fashioniq_task7": 13,
-        "cirr_task7": 14,
-        "oven_task8": 15,
-        "infoseek_task8": 16,
-    }
-    split_order = {"val": 1, "test": 2}
-    cand_pool_order = {"union": 99}
-    eval_results_sorted = sorted(
-        eval_results,
-        key=lambda x: (
-            x["TaskID"],
-            dataset_order.get(x["Dataset"].lower(), 99),  # default to 99 for datasets not listed
-            split_order.get(x["Split"].lower(), 99),  # default to 99 for splits not listed
-            cand_pool_order.get(x["CandPool"].lower(), 0),
-        ),
-    )
-
-    grouped_results = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
-
-    # Populate the grouped_results with metric values
-    available_recall_metrics = [
-        "Recall@1",
-        "Recall@5",
-        "Recall@10",
-        "Recall@20",
-        "Recall@50",
-    ]
-    for result in eval_results_sorted:
-        key = (result["TaskID"], result["Task"], result["Dataset"], result["Split"])
-        for metric in available_recall_metrics:
-            grouped_results[key][result["CandPool"]].update({metric: result.get(metric, None)})
-
-    # Write the sorted data to TSV
-    if retrieval_config.write_to_tsv:
-        # TODO: create a better file name
-        date_time = datetime.now().strftime("%m-%d-%H")
-        tsv_file_name = f"eval_results_{date_time}.tsv"
-        tsv_file_path = os.path.join(exp_tsv_results_dir, tsv_file_name)
-        tsv_data = []
-        header = [
-            "TaskID",
-            "Task",
-            "Dataset",
-            "Split",
-            "Metric",
-            "CandPool",
-            "Value",
-            "UnionPool",
-            "UnionValue",
-        ]
-        tsv_data.append(header)
-
-        for (task_id, task, dataset, split), cand_pools in grouped_results.items():
-            # Extract union results if available
-            union_results = cand_pools.get("union", {})
-            for metric in available_recall_metrics:
-                for cand_pool, metrics in cand_pools.items():
-                    if cand_pool != "union":  # Exclude union pool as it's handled separately
-                        row = [
-                            task_id,
-                            task,
-                            dataset,
-                            split,
-                            metric,
-                            cand_pool,
-                            metrics.get(metric, None),
-                        ]
-                        # Skip metric if it's not available
-                        if row[-1] is None:
-                            continue
-                        # Add corresponding union metric value if it exists
-                        if union_results:
-                            row.extend(["union", union_results.get(metric, "N/A")])
-                        else:
-                            row.extend(["", ""])  # Fill with empty values if no union result
-                        tsv_data.append(row)
-
-        # Write to TSV
-        with open(tsv_file_path, "w", newline="") as tsvfile:
-            writer = csv.writer(tsvfile, delimiter="\t")
-            for row in tsv_data:
-                writer.writerow(row)
-
-        print(f"Retriever: Results saved to {tsv_file_path}")
 
 
 def run_hard_negative_mining(config):
@@ -736,6 +708,7 @@ def main():
 
     print(OmegaConf.to_yaml(config, sort_keys=False))
 
+    query_embedder_config = None  # Fix: Always define this variable
     interactive_retrieval = True if args.query_embedder_config_path else False
     if interactive_retrieval:
         query_embedder_config = OmegaConf.load(args.query_embedder_config_path)

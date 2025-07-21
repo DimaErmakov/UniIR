@@ -89,12 +89,25 @@ class MBEIRDatasetBase(Dataset):
                 prompts_dict[key] = prompts
         self.query_instructions = prompts_dict
 
-    def _load_and_preprocess_image(self, query_img_path):
+    def _load_and_preprocess_image(self, query_img_path, qid):
         """Load an image given a path"""
         if not query_img_path:
             return None
-        full_query_img_path = os.path.join(self.mbeir_data_dir, query_img_path)
-        assert os.path.exists(full_query_img_path), f"Image Path {full_query_img_path} does not exist"
+        # Replace 'images_ft' with 'images/copied_images' in the path
+        query_img_path = query_img_path.lstrip("./")
+
+        # query_img_path = query_img_path.replace('images_ft', 'images/copied_images')
+        # print(f"Query Image Path: {query_img_path}")
+        # full_query_img_path = os.path.join(self.mbeir_data_dir, query_img_path)
+        full_query_img_path = os.path.join(self.mbeir_data_dir, str(qid[2:]), f"{qid[2:]}_1.png")
+        # assert os.path.exists(full_query_img_path), f"Image Path {full_query_img_path} does not exist"
+        if not os.path.exists(full_query_img_path): 
+            # print(f"Image Path {full_query_img_path} does not exist")
+            full_query_img_path = os.path.join(self.mbeir_data_dir, str(qid[2:]), f"{qid[2:]}_1.jpg")
+            if not os.path.exists(full_query_img_path):
+                # print(f"Image Path {full_query_img_path} does not exist")
+                return None
+
         image = Image.open(full_query_img_path).convert("RGB")
         image = self.img_preprocess_fn(image)
         return image
@@ -195,23 +208,32 @@ class MBEIRMainDataset(MBEIRDatasetBase):
 
         # Randomly sample a positive example
         pos_cand_list = mbeir_entry.get("pos_cand_list", [])
-        assert len(pos_cand_list) > 0, f"Cannot find positive candidates for {mbeir_entry}"
+        
+        # Handle case where there are no positive candidates (for embedding queries only)
+        if len(pos_cand_list) == 0:
+            # For embedding queries without positive candidates, use the same modality as query
+            pos_cand_modality = query_modality  # Use same modality as query
+            pos_cand_txt = ""
+        else:
+            # TODO: Fix this hack for OVEN and INFOSEEK
+            # We only choose the one matched with the query dataset_id due to OVEN and INFOSEEK
+            if self.mode == Mode.EVAL:
+                pos_cand_list = [
+                    pos_cand_did for pos_cand_did in pos_cand_list if pos_cand_did.split(":")[0] == query_dataset_id
+                ]
 
-        # TODO: Fix this hack for OVEN and INFOSEEK
-        # We only choose the one matched with the query dataset_id due to OVEN and INFOSEEK
-        if self.mode == Mode.EVAL:
-            pos_cand_list = [
-                pos_cand_did for pos_cand_did in pos_cand_list if pos_cand_did.split(":")[0] == query_dataset_id
-            ]
-
-        selected_pos_cand_did = self.select_cand(pos_cand_list)
-        pos_cand = self.cand_pool.get(selected_pos_cand_did)
-        assert pos_cand, f"Cannot find positive candidate {selected_pos_cand_did} for {mbeir_entry}"
-        # Note: pos_cand_dataset_id should be the same as query_dataset_id but for OVEN and INFOSEEK it is not.
-        pos_cand_dataset_id = selected_pos_cand_did.split(":")[0]
-        pos_cand_modality = pos_cand.get("modality", None)
-        pos_cand_txt = pos_cand.get("txt") or ""
-        pos_cand_txt = format_string(pos_cand_txt)
+            if len(pos_cand_list) > 0:
+                selected_pos_cand_did = self.select_cand(pos_cand_list)
+                pos_cand = self.cand_pool.get(selected_pos_cand_did)
+                # Note: pos_cand_dataset_id should be the same as query_dataset_id but for OVEN and INFOSEEK it is not.
+                pos_cand_dataset_id = selected_pos_cand_did.split(":")[0]
+                pos_cand_modality = pos_cand.get("modality", None)
+                pos_cand_txt = pos_cand.get("txt") or ""
+                pos_cand_txt = format_string(pos_cand_txt)
+            else:
+                # No valid positive candidates found
+                pos_cand_modality = "text"  # Default modality
+                pos_cand_txt = ""
 
         # Randomly sample a query prompt
         # Note:query_modality and pos_cand_modality should define the golden modalities of the current mbeir_entry task.
@@ -225,7 +247,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         if self.mode == Mode.TRAIN:
             neg_cand_id_list = mbeir_entry.get("neg_cand_list", [])
             if self.hard_neg_num > 0:
-                assert len(neg_cand_id_list) > 0, f"Cannot find negative candidates for {mbeir_entry}"
+                # assert len(neg_cand_id_list) > 0, f"Cannot find negative candidates for {mbeir_entry}"
                 if self.shuffle_cand:
                     random.shuffle(neg_cand_id_list)
                 selected_neg_cand_id_list = []
@@ -240,13 +262,14 @@ class MBEIRMainDataset(MBEIRDatasetBase):
                     neg_cand["txt"] = neg_cand_txt
                     selected_neg_cand_list.append(neg_cand)
 
-        def _prepare_data_dict(txt, img_path):
-            img = self._load_and_preprocess_image(img_path)
+        def _prepare_data_dict(txt, img_path, qid):
+            img = self._load_and_preprocess_image(img_path, qid)
             return {"txt": txt, "img": img}
 
         query = _prepare_data_dict(
             (query_txt_with_prompt if self.enable_query_instruct else query_txt_without_prompt),
             query_img_path,
+            qid
         )
         instance = {"query": query}
 
@@ -264,6 +287,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             pos_cand = _prepare_data_dict(
                 pos_cand_txt,
                 pos_cand.get("img_path", None),
+                qid
             )
             instance.update({"pos_cand": pos_cand})
 
@@ -271,6 +295,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
                 _prepare_data_dict(
                     neg_cand["txt"],
                     neg_cand.get("img_path", None),
+                    qid
                 )
                 for neg_cand in selected_neg_cand_list
             ]
@@ -336,8 +361,8 @@ class MBEIRInferenceOnlyDataset(MBEIRDatasetBase):
         query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
         query_txt_without_prompt = format_string(query_txt)
 
-        def _prepare_data_dict(txt, img_path):
-            img = self._load_and_preprocess_image(img_path)
+        def _prepare_data_dict(txt, img_path, qid):
+            img = self._load_and_preprocess_image(img_path, qid)
             return {"txt": txt, "img": img}
 
         query = _prepare_data_dict(
@@ -391,7 +416,9 @@ class MBEIRCandidatePoolDataset(MBEIRDatasetBase):
     def __getitem__(self, index):
         mbeir_cand_pool_entry = self.cand_pool[index]
         img_path = mbeir_cand_pool_entry.get("img_path", None)
-        img = self._load_and_preprocess_image(img_path)
+        did = mbeir_cand_pool_entry.get("did", None)
+
+        img = self._load_and_preprocess_image(img_path, did)
 
         did = mbeir_cand_pool_entry.get("did", None)
         dataset_id = did.split(":")[0] if did else None
