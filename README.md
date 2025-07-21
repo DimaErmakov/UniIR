@@ -9,10 +9,29 @@ Information Retrievers](https://arxiv.org/pdf/2311.17136.pdf)"
 - **🔥[2024-04-13]**: We highlight another valuable and concurrent research on training instruction-following, multi-task multi-modal retrievers with Late-interaction:[PreFLMR: Scaling Up Fine-Grained Late-Interaction Multi-modal Retrievers](https://preflmr.github.io/) , which was done by the researchers of the University of Cambridge. They also introduced the M2KR benchmark which can be used to train and evaluate multi-modal universal information retrievers. We may combine the M2KR and M-BEIR benchmarks together to facilitate the advance of this field.
 - **🔥[2024-03-18]: Release the UniIR(CLIP_SF) large and UniIR(BLIP_FF) large checkpoints [**🤗 Checkpoints**](https://huggingface.co/TIGER-Lab/UniIR)**
 - **🔥[2023-12-21]: Our [🤗 M-BEIR Benchmark](https://huggingface.co/datasets/TIGER-Lab/M-BEIR) is now available for use.**
+- DIMITRY's NOTES on the code: here is the code I used To attempt to utilize bio clip instead of clip and the code I used to embed queries from AgMMU (https://github.com/DimaErmakov/AgMMU). The code is a little bit funky but should work in theory. You will most likely need to change your pathing, I would just command shift f to find all instances of "dermakov". I would recommend looking at all of my previous commits to see what code was changed. It is important to note that I never managed to get Bioclip To work so that code should be somewhat ignored. You will need a couple of jason files for this code to work:
+
+test_of_rag.jsonl = training evaluation set
+
+train_of_rag.jsonl = train the model on this
+
+cand_rag3.jsonl = the candidate pool
+
+6k_evalset_wbg.json = set to use for benchmarking
+
+data/6k_evalset_wbg_add_on.jsonl = cleaned version for embedding queries
+
+mbeir_sample_test.jsonl = the queries (should be a modified version of 6k_evalset_wbg.json by using clean_and_convert_json.py to clean 6k_evalset_wbg.json and then use add_fields_to_json.py) to embed for RAG
+
+AgMMU/data/agmmu_ft_hf1.json - agbase
+
 
 
 ## Introduction
 We propose the **UniIR**(Universal multimodal Information Retrieval) **framework** to learn a single retriever to accomplish (possibly) any retrieval task. Unlike traditional IR systems, UniIR needs to follow the instructions to take a heterogeneous query to retrieve from a heterogeneous candidate pool with millions of candidates in diverse modalities.
+
+
+
 
 <img src="docs/images/uniir_teaser.jpg" alt="UniIR Teaser" style="width:80%;">
 
